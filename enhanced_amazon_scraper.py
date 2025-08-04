@@ -17,6 +17,181 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# ===============================================
+# NEW FUNCTIONALITY: URL TRACKING AND PRICE/AVAILABILITY CHECKING
+# ===============================================
+
+def manage_visited_urls_file(file_path="visited_urls.txt"):
+    """
+    Check if visited_urls.txt exists, create it if not, and return the file path.
+    """
+    if not os.path.exists(file_path):
+        print(f"📝 Creating new visited URLs file: {file_path}")
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Visited URLs tracking file created on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        logging.info(f"Created new visited URLs file: {file_path}")
+    else:
+        print(f"📋 Using existing visited URLs file: {file_path}")
+        logging.info(f"Using existing visited URLs file: {file_path}")
+    
+    return file_path
+
+def load_visited_urls(file_path="visited_urls.txt"):
+    """
+    Load visited URLs from the tracking file.
+    """
+    visited_urls = set()
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    visited_urls.add(line)
+        logging.info(f"Loaded {len(visited_urls)} visited URLs from {file_path}")
+    except FileNotFoundError:
+        logging.warning(f"Visited URLs file not found: {file_path}")
+    
+    return visited_urls
+
+def append_visited_url(url, file_path="visited_urls.txt"):
+    """
+    Append a new URL to the visited URLs file.
+    """
+    try:
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(f"{url}\n")
+        logging.info(f"Added URL to visited list: {url}")
+    except Exception as e:
+        logging.error(f"Error adding URL to visited list: {e}")
+
+def extract_price_from_page(driver, url):
+    """
+    Extract price from an Amazon product page using the span class patterns we analyzed.
+    Returns the price string if found, otherwise returns None.
+    """
+    try:
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # Look for price using the a-price-whole class pattern
+        price_elements = soup.find_all('span', class_='a-price-whole')
+        
+        if price_elements:
+            # Try to find the most prominent price (usually the first one in main content)
+            for price_elem in price_elements:
+                price_text = price_elem.get_text(strip=True)
+                if price_text and re.search(r'\d+', price_text):
+                    # Clean up the price text
+                    price_clean = re.sub(r'[^\d,.]', '', price_text)
+                    if price_clean:
+                        logging.info(f"Extracted price: {price_text} from {url}")
+                        return price_text
+        
+        # Fallback: look for other price patterns
+        price_patterns = [
+            soup.find('span', class_='a-price a-text-price a-size-medium apexPriceToPay'),
+            soup.find('span', class_='a-price aok-align-center reinventPricePriceToPayMargin priceToPay'),
+            soup.find('span', {'data-a-size': 'xl', 'class': 'a-price'})
+        ]
+        
+        for price_container in price_patterns:
+            if price_container:
+                price_whole = price_container.find('span', class_='a-price-whole')
+                if price_whole:
+                    price_text = price_whole.get_text(strip=True)
+                    if price_text and re.search(r'\d+', price_text):
+                        logging.info(f"Extracted price (fallback): {price_text} from {url}")
+                        return price_text
+        
+        logging.warning(f"No price found on page: {url}")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error extracting price from {url}: {e}")
+        return None
+
+def check_availability_status(driver, url):
+    """
+    Check if the product is available or shows "Currently unavailable" message.
+    Returns the availability status.
+    """
+    try:
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # Look for the "Currently unavailable" span we analyzed
+        unavailable_elements = soup.find_all('span', class_='a-size-medium a-color-success')
+        
+        for elem in unavailable_elements:
+            text = elem.get_text(strip=True)
+            if 'currently unavailable' in text.lower():
+                logging.info(f"Product unavailable: {text} from {url}")
+                return "Currently unavailable"
+        
+        # Look for other availability indicators
+        availability_patterns = [
+            soup.find('div', id='availability'),
+            soup.find('span', class_='a-color-success'),
+            soup.find('span', class_='a-color-base'),
+        ]
+        
+        for avail_elem in availability_patterns:
+            if avail_elem:
+                text = avail_elem.get_text(strip=True).lower()
+                if any(phrase in text for phrase in ['currently unavailable', 'out of stock', 'temporarily unavailable']):
+                    logging.info(f"Product unavailable (pattern match): {text} from {url}")
+                    return "Currently unavailable"
+                elif any(phrase in text for phrase in ['in stock', 'available', 'add to cart']):
+                    logging.info(f"Product available: {text} from {url}")
+                    return "Available"
+        
+        # If no clear unavailability message found, assume available
+        logging.info(f"Availability status unclear, assuming available for {url}")
+        return "Available"
+        
+    except Exception as e:
+        logging.error(f"Error checking availability for {url}: {e}")
+        return "Unknown"
+
+def extract_price_and_availability(driver, url):
+    """
+    Main function to extract both price and availability from an Amazon product page.
+    Returns a dictionary with price and availability information.
+    """
+    try:
+        logging.info(f"Extracting price and availability from: {url}")
+        
+        # Load the page
+        driver.get(url)
+        time.sleep(3)  # Wait for page to load
+        
+        # Check availability first
+        availability = check_availability_status(driver, url)
+        
+        # Extract price based on availability
+        if availability == "Currently unavailable":
+            price = "Currently unavailable"
+        else:
+            price = extract_price_from_page(driver, url)
+            if not price:
+                price = "Price not found"
+        
+        result = {
+            'price': price,
+            'availability': availability,
+            'extracted_at': datetime.now().isoformat()
+        }
+        
+        logging.info(f"Extraction result for {url}: {result}")
+        return result
+        
+    except Exception as e:
+        logging.error(f"Error in extract_price_and_availability for {url}: {e}")
+        return {
+            'price': "Error extracting price",
+            'availability': "Error checking availability",
+            'extracted_at': datetime.now().isoformat(),
+            'error': str(e)
+        }
+
 # Import ranking logic from improved_offervalue.py
 @dataclass
 class Offer:
@@ -1187,7 +1362,16 @@ class ComprehensiveAmazonExtractor:
 
 def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=0, max_entries=None):
     """
-    Enhanced process that finds and processes ALL Amazon store links comprehensively
+    Enhanced process that finds and processes ALL Amazon store links comprehensively.
+    
+    NEW FEATURES:
+    1. Tracks visited URLs in visited_urls.txt file (creates if not exists)
+    2. Extracts product price and availability status for each Amazon URL
+    3. Updates the 'price' key at the same level as 'url' with:
+       - Actual price if available (from span class="a-price-whole")
+       - "Currently unavailable" if span class="a-size-medium a-color-success" contains unavailable message
+    4. Maintains existing bank offers scraping functionality
+    5. Appends processed URLs to visited_urls.txt to avoid re-processing
     """
     
     # Load the JSON data
@@ -1197,17 +1381,9 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
     
     print(f"✅ Loaded {len(data)} entries")
     
-    # Load visited URLs to avoid re-scraping
-    visited_urls_file = "amazon_urls_with_offers_20250802_132339.txt"
-    visited_urls = set()
-    
-    try:
-        with open(visited_urls_file, 'r', encoding='utf-8') as f:
-            visited_urls = set(line.strip() for line in f if line.strip() and not line.startswith('#'))
-        print(f"📋 Loaded {len(visited_urls)} visited URLs from {visited_urls_file}")
-    except FileNotFoundError:
-        print(f"⚠️  Warning: {visited_urls_file} not found. Will process all URLs.")
-        visited_urls = set()
+    # Setup visited URLs tracking with new functionality
+    visited_urls_file = manage_visited_urls_file("visited_urls.txt")
+    visited_urls = load_visited_urls(visited_urls_file)
     
     # Use comprehensive extractor to find ALL Amazon links
     extractor = ComprehensiveAmazonExtractor()
@@ -1223,24 +1399,17 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
         print(f"🔢 Limited to processing {len(amazon_store_links)} links")
     
     # Setup Chrome driver and analyzer
-    # Configure Chrome options for headless mode
+    # Configure Chrome options for headless mode (always headless by default)
     options = uc.ChromeOptions()
     
-    # Add headless mode - can be controlled via environment variable or parameter
-    import os
-    headless_mode = os.getenv('HEADLESS', 'true').lower() == 'true'
-    
-    if headless_mode:
-        print("🤖 Running in headless mode (suitable for servers)")
-        options.add_argument('--headless=new')  # Use new headless mode
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--disable-web-security')
-        options.add_argument('--disable-features=VizDisplayCompositor')
-        options.add_argument('--window-size=1920,1080')
-    else:
-        print("🖥️  Running with visible browser")
+    print("🤖 Running in headless mode (server mode)")
+    options.add_argument('--headless=new')  # Use new headless mode
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--disable-web-security')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    options.add_argument('--window-size=1920,1080')
     
     # Additional options for better compatibility
     options.add_argument('--disable-blink-features=AutomationControlled')
@@ -1271,6 +1440,25 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
                 print(f"   ⏭️  URL already scraped, skipping to preserve existing offers")
                 continue
             
+            # Extract price and availability information
+            price_availability_info = extract_price_and_availability(driver, amazon_url)
+            
+            # Update the store_link with price information at the same level as 'url'
+            if price_availability_info['availability'] == "Currently unavailable":
+                store_link['price'] = "Currently unavailable"
+            else:
+                # If price was extracted successfully, update it
+                if price_availability_info['price'] and price_availability_info['price'] not in ["Price not found", "Error extracting price"]:
+                    store_link['price'] = price_availability_info['price']
+                elif 'price' not in store_link or not store_link['price']:
+                    store_link['price'] = "Price not available"
+            
+            # Store detailed price/availability info for reference
+            store_link['price_availability_details'] = price_availability_info
+            
+            print(f"   💰 Price: {store_link['price']}")
+            print(f"   📦 Availability: {price_availability_info['availability']}")
+            
             # Get bank offers
             offers = get_bank_offers(driver, amazon_url)
             
@@ -1295,12 +1483,16 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
                 print(f"   ❌ No offers found")
                 store_link['ranked_offers'] = []
             
-            # Save progress every 10 entries
-            if (idx + 1) % 10 == 0:
+            # Add URL to visited list after successful processing
+            append_visited_url(amazon_url, visited_urls_file)
+            visited_urls.add(amazon_url)
+            
+            # Save progress every 100 entries (optimized backup frequency)
+            if (idx + 1) % 100 == 0:
                 backup_file = f"{output_file}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 with open(backup_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
-                print(f"   💾 Progress saved to {backup_file}")
+                print(f"   💾 Progress saved to {backup_file} (every 100 URLs)")
             
             # Small delay between requests
             time.sleep(2)
@@ -1340,54 +1532,24 @@ if __name__ == "__main__":
     input_file = "all_data.json"
     output_file = "all_data_amazon.json"
     
-    print("🚀 ENHANCED COMPREHENSIVE AMAZON BANK OFFER SCRAPER & RANKER")
-    print("This script finds ALL Amazon store links in deep nested JSON and adds ranked bank offers")
-    print("🎯 NEW: Now searches variants + all_matching_products + unmapped sections!")
+    print("🚀 ENHANCED COMPREHENSIVE AMAZON SCRAPER WITH PRICE & AVAILABILITY TRACKING")
+    print("This script finds ALL Amazon store links in deep nested JSON and adds:")
+    print("  🎯 Product prices and availability status")
+    print("  🏆 Ranked bank offers") 
+    print("  📝 URL visit tracking (visited_urls.txt)")
+    print("🎯 FEATURES: Price extraction + Availability checking + Bank offers + URL tracking")
+    print("🤖 DEFAULT MODE: Headless browser, processes all URLs, backups every 100 URLs")
     print("-" * 80)
     
-    # Check for command line arguments for headless mode
-    if len(sys.argv) > 1 and '--headless' in sys.argv:
-        os.environ['HEADLESS'] = 'true'
-        print("🤖 Headless mode enabled via command line")
-    elif len(sys.argv) > 1 and '--gui' in sys.argv:
-        os.environ['HEADLESS'] = 'false'
-        print("🖥️  GUI mode enabled via command line")
+    # Default configuration - no user interaction required
+    start_idx = 0  # Always start from beginning
+    max_entries = None  # Process all entries
     
-    # Ask user for browser mode if not specified
-    if 'HEADLESS' not in os.environ:
-        while True:
-            browser_mode = input("Run in headless mode? (y/n) [y for servers]: ").lower().strip()
-            if browser_mode in ['y', 'yes', '']:
-                os.environ['HEADLESS'] = 'true'
-                break
-            elif browser_mode in ['n', 'no']:
-                os.environ['HEADLESS'] = 'false'
-                break
-            else:
-                print("Please enter 'y' for yes or 'n' for no")
-    
-    # Ask user for parameters
-    while True:
-        try:
-            start_idx = input("Enter start index (or 0 for beginning): ")
-            start_idx = int(start_idx) if start_idx else 0
-            break
-        except ValueError:
-            print("Please enter a valid number")
-    
-    while True:
-        try:
-            max_entries = input("Enter max entries to process (or 'all' for all): ")
-            if max_entries.lower() == 'all':
-                max_entries = None
-                break
-            else:
-                max_entries = int(max_entries)
-                if max_entries > 0:
-                    break
-                else:
-                    print("Please enter a positive number")
-        except ValueError:
-            print("Please enter a valid number or 'all'")
+    print(f"⚙️  CONFIGURATION:")
+    print(f"   📍 Start index: {start_idx} (beginning)")
+    print(f"   🔢 Max entries: {'All' if max_entries is None else max_entries}")
+    print(f"   🤖 Browser mode: Headless (server mode)")
+    print(f"   💾 Backup frequency: Every 100 processed URLs")
+    print()
     
     process_comprehensive_amazon_store_links(input_file, output_file, start_idx, max_entries) 
