@@ -154,7 +154,7 @@ def check_availability_status(driver, url):
 def extract_price_and_availability(driver, url):
     """
     Main function to extract both price and availability from an Amazon product page.
-    Returns a dictionary with price and availability information.
+    Returns a dictionary with price and availability information including in_stock status.
     """
     try:
         logging.info(f"Extracting price and availability from: {url}")
@@ -163,20 +163,54 @@ def extract_price_and_availability(driver, url):
         driver.get(url)
         time.sleep(3)  # Wait for page to load
         
-        # Check availability first
-        availability = check_availability_status(driver, url)
+        # Get page soup for element checking
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Extract price based on availability
-        if availability == "Currently unavailable":
-            price = "Currently unavailable"
-        else:
-            price = extract_price_from_page(driver, url)
-            if not price:
+        # Initialize variables
+        price = None
+        in_stock = True  # Default to in stock
+        availability = "Available"  # Default availability
+        
+        # Check for unavailable status first (class 'a-size-medium a-color-success')
+        unavailable_elements = soup.find_all('span', class_='a-size-medium a-color-success')
+        for elem in unavailable_elements:
+            text = elem.get_text(strip=True).lower()
+            if 'currently unavailable' in text or 'out of stock' in text:
+                # Found unavailable indicator - don't update price, set in_stock = false
+                in_stock = False
+                availability = "Currently unavailable"
+                price = "Currently unavailable"
+                logging.info(f"Product unavailable (a-size-medium a-color-success): {text} from {url}")
+                break
+        
+        # Check for price availability (class 'a-price-whole')
+        if in_stock:  # Only check for price if product is in stock
+            price_elements = soup.find_all('span', class_='a-price-whole')
+            if price_elements:
+                # Found price element - update price and set in_stock = true
+                price = extract_price_from_page(driver, url)
+                if price:
+                    in_stock = True
+                    availability = "Available"
+                    logging.info(f"Price found (a-price-whole exists), in_stock = true for {url}")
+                else:
+                    price = "Price not found"
+            else:
+                # No price element found
                 price = "Price not found"
+                availability = "Price not available"
+        
+        # If no specific conditions met, use fallback availability check
+        if availability == "Available" and not price:
+            availability = check_availability_status(driver, url)
+            if availability == "Currently unavailable":
+                in_stock = False
+                price = "Currently unavailable"
         
         result = {
-            'price': price,
+            'price': price if price else "Price not found",
             'availability': availability,
+            'in_stock': in_stock,
             'extracted_at': datetime.now().isoformat()
         }
         
@@ -188,6 +222,7 @@ def extract_price_and_availability(driver, url):
         return {
             'price': "Error extracting price",
             'availability': "Error checking availability",
+            'in_stock': False,
             'extracted_at': datetime.now().isoformat(),
             'error': str(e)
         }
@@ -1443,21 +1478,21 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
             # Extract price and availability information
             price_availability_info = extract_price_and_availability(driver, amazon_url)
             
-            # Update the store_link with price information at the same level as 'url'
-            if price_availability_info['availability'] == "Currently unavailable":
-                store_link['price'] = "Currently unavailable"
-            else:
+            # Set in_stock status based on extracted information
+            store_link['in_stock'] = price_availability_info.get('in_stock', True)
+            
+            # Only update price if in_stock is true, otherwise keep existing price
+            if store_link['in_stock']:
                 # If price was extracted successfully, update it
-                if price_availability_info['price'] and price_availability_info['price'] not in ["Price not found", "Error extracting price"]:
+                if price_availability_info['price'] and price_availability_info['price'] not in ["Price not found", "Error extracting price", "Currently unavailable"]:
                     store_link['price'] = price_availability_info['price']
                 elif 'price' not in store_link or not store_link['price']:
                     store_link['price'] = "Price not available"
-            
-            # Store detailed price/availability info for reference
-            store_link['price_availability_details'] = price_availability_info
+            # If in_stock is false, keep the existing price value unchanged
             
             print(f"   💰 Price: {store_link['price']}")
             print(f"   📦 Availability: {price_availability_info['availability']}")
+            print(f"   📋 In Stock: {store_link['in_stock']}")
             
             # Get bank offers
             offers = get_bank_offers(driver, amazon_url)
