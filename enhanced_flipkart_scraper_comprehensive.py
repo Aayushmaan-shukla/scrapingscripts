@@ -92,7 +92,7 @@ def append_visited_url(url, file_path="visited_urls.txt"):
 
 def extract_flipkart_price_and_stock(driver, url, offers_found=False):
     """
-    Extract price and stock status from Flipkart product page
+    Extract price and stock status from Flipkart product page with robust error handling
     
     REFINED LOGIC for in_stock flag:
     1. If "Sold Out" tag exists → in_stock = False
@@ -111,8 +111,29 @@ def extract_flipkart_price_and_stock(driver, url, offers_found=False):
     }
     """
     try:
-        # Get page source for parsing
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # Check if driver session is still alive before proceeding
+        try:
+            # Test driver connection by getting current URL
+            current_url = driver.current_url
+            logging.info(f"Driver session active, current URL: {current_url[:100]}...")
+        except Exception as session_error:
+            logging.error(f"Driver session lost, attempting to recreate: {session_error}")
+            raise ConnectionRefusedError("WebDriver session lost - need to recreate driver")
+        
+        # Get page source for parsing with retry mechanism
+        try:
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+        except Exception as page_error:
+            logging.error(f"Error getting page source: {page_error}")
+            # Try to reload the page once more
+            try:
+                driver.refresh()
+                time.sleep(3)
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                logging.info("Successfully recovered page source after refresh")
+            except Exception as retry_error:
+                logging.error(f"Failed to recover page source: {retry_error}")
+                raise ConnectionRefusedError("Cannot access page source - driver connection failed")
         
         result = {
             'price': None,
@@ -551,12 +572,25 @@ def extract_price_amount(price_str):
     return 0.0
 
 def get_flipkart_offers(driver, url, max_retries=2):
-    """Enhanced Flipkart offers scraping"""
+    """Enhanced Flipkart offers scraping with connection error handling"""
     for attempt in range(max_retries):
         try:
             logging.info(f"Visiting Flipkart URL (attempt {attempt + 1}/{max_retries}): {url}")
-            driver.get(url)
-            time.sleep(3)
+            
+            # Check driver session before making request
+            try:
+                driver.get(url)
+                time.sleep(3)
+            except Exception as connection_error:
+                logging.error(f"Connection error on attempt {attempt + 1}: {connection_error}")
+                if "Connection refused" in str(connection_error) or "HTTPConnectionPool" in str(connection_error):
+                    logging.error("WebDriver session lost - raising ConnectionRefusedError")
+                    raise ConnectionRefusedError("WebDriver session lost during page load")
+                if attempt < max_retries - 1:
+                    time.sleep(5)  # Wait before retry
+                    continue
+                else:
+                    raise
 
             # Close login popup if it appears
             try:
@@ -582,7 +616,18 @@ def get_flipkart_offers(driver, url, max_retries=2):
                     continue
                 return []
 
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            # Get page source with error handling
+            try:
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+            except Exception as page_error:
+                logging.error(f"Error getting page source in get_flipkart_offers: {page_error}")
+                if "Connection refused" in str(page_error) or "HTTPConnectionPool" in str(page_error):
+                    raise ConnectionRefusedError("Cannot access page source - driver connection failed")
+                if attempt < max_retries - 1:
+                    time.sleep(3)
+                    continue
+                return []
+            
             offers = []
             
             # Find offers using multiple patterns
@@ -712,6 +757,20 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
     processed_count = 0
     new_offers_count = 0
     
+    def recreate_driver():
+        """Recreate WebDriver when connection is lost"""
+        print("🔄 Recreating WebDriver due to connection loss...")
+        nonlocal driver
+        try:
+            driver.quit()
+        except:
+            pass
+        
+        # Recreate driver with same options
+        driver = uc.Chrome(options=options)
+        print("✅ WebDriver recreated successfully")
+        return driver
+    
     try:
         for idx, link_data in enumerate(flipkart_links):
             print(f"\n🔍 Processing {idx + 1}/{len(flipkart_links)}")
@@ -726,12 +785,56 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
             else:
                 print(f"   🆕 Processing new link")
             
-            # Get Flipkart offers first to determine if offers exist
-            offers = get_flipkart_offers(driver, link_data['url'])
-            offers_found = bool(offers and len(offers) > 0)
+            # Get Flipkart offers with connection error handling
+            max_driver_retries = 2
+            offers = None
+            offers_found = False
             
-            # Extract price and stock status information WITH offers context
-            price_stock_info = extract_flipkart_price_and_stock(driver, link_data['url'], offers_found=offers_found)
+            for driver_attempt in range(max_driver_retries):
+                try:
+                    offers = get_flipkart_offers(driver, link_data['url'])
+                    offers_found = bool(offers and len(offers) > 0)
+                    break  # Success, exit retry loop
+                    
+                except ConnectionRefusedError as conn_error:
+                    print(f"   ⚠️  Connection error on attempt {driver_attempt + 1}: {conn_error}")
+                    if driver_attempt < max_driver_retries - 1:
+                        driver = recreate_driver()
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"   ❌ Failed to get offers after {max_driver_retries} attempts")
+                        offers = []
+                        offers_found = False
+                        break
+                        
+                except Exception as e:
+                    print(f"   ⚠️  Error extracting offers: {e}")
+                    offers = []
+                    offers_found = False
+                    break
+            
+            # Extract price and stock status information WITH offers context and error handling
+            price_stock_info = {'price': None, 'in_stock': None}
+            
+            for driver_attempt in range(max_driver_retries):
+                try:
+                    price_stock_info = extract_flipkart_price_and_stock(driver, link_data['url'], offers_found=offers_found)
+                    break  # Success, exit retry loop
+                    
+                except ConnectionRefusedError as conn_error:
+                    print(f"   ⚠️  Connection error extracting price/stock on attempt {driver_attempt + 1}: {conn_error}")
+                    if driver_attempt < max_driver_retries - 1:
+                        driver = recreate_driver()
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"   ❌ Failed to extract price/stock after {max_driver_retries} attempts")
+                        break
+                        
+                except Exception as e:
+                    print(f"   ⚠️  Error extracting price/stock: {e}")
+                    break
             
             # Update price if found, otherwise keep existing price
             if price_stock_info['price']:
@@ -836,5 +939,5 @@ if __name__ == "__main__":
     # Start processing immediately with default parameters
     process_comprehensive_flipkart_links(
         input_file="all_data.json",
-        output_file="all_data_flipkart.json"
+        output_file="comprehensive_amazon_offers.json"
     ) 
