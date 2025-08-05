@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 from bs4 import BeautifulSoup
 import undetected_chromedriver as uc
 import logging
@@ -985,8 +986,36 @@ def get_bank_offers(driver, url, max_retries=2):
     for attempt in range(max_retries):
         try:
             logging.info(f"Visiting URL (attempt {attempt + 1}/{max_retries}): {url}")
+            
+            # Enhanced loading with server-specific delays
             driver.get(url)
-            time.sleep(5)  # let page load
+            time.sleep(3)  # Initial page load
+            
+            # Check if page is actually loaded by looking for Amazon elements
+            page_load_timeout = 15
+            start_time = time.time()
+            page_loaded = False
+            
+            while (time.time() - start_time) < page_load_timeout:
+                try:
+                    # Check for key Amazon page elements to confirm loading
+                    if driver.find_elements(By.TAG_NAME, "body") and "amazon" in driver.current_url.lower():
+                        page_loaded = True
+                        break
+                except:
+                    pass
+                time.sleep(1)
+            
+            if not page_loaded:
+                logging.warning(f"Page may not have loaded properly after {page_load_timeout}s")
+                if attempt < max_retries - 1:
+                    time.sleep(5)  # Extra delay before retry
+                    continue
+            else:
+                logging.info("Page loaded successfully")
+                
+            # Additional delay for server environments to ensure all elements load
+            time.sleep(4)  # Extra time for offers to load
             
             all_offers = []
             
@@ -1433,24 +1462,98 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
         amazon_store_links = amazon_store_links[:max_entries]
         print(f"🔢 Limited to processing {len(amazon_store_links)} links")
     
-    # Setup Chrome driver and analyzer
-    # Configure Chrome options for headless mode (always headless by default)
+    # Setup Chrome driver and analyzer with enhanced server configuration
     options = uc.ChromeOptions()
     
-    print("🤖 Running in headless mode (server mode)")
+    print("🤖 Running in enhanced server mode with anti-detection")
+    
+    # Core headless configuration
     options.add_argument('--headless=new')  # Use new headless mode
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--disable-web-security')
-    options.add_argument('--disable-features=VizDisplayCompositor')
     options.add_argument('--window-size=1920,1080')
     
-    # Additional options for better compatibility
+    # Enhanced anti-detection configuration for servers
     options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    options.add_argument('--disable-web-security')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    options.add_argument('--disable-background-timer-throttling')
+    options.add_argument('--disable-backgrounding-occluded-windows')
+    options.add_argument('--disable-renderer-backgrounding')
+    options.add_argument('--disable-features=TranslateUI')
+    options.add_argument('--disable-ipc-flooding-protection')
+    options.add_argument('--disable-logging')
+    options.add_argument('--disable-default-apps')
+    options.add_argument('--disable-extensions')
+    options.add_argument('--disable-plugins')
+    options.add_argument('--disable-software-rasterizer')
+    options.add_argument('--disable-background-networking')
     
-    driver = uc.Chrome(options=options)
+    # Network and connectivity options for servers
+    options.add_argument('--max_old_space_size=4096')
+    options.add_argument('--aggressive-cache-discard')
+    options.add_argument('--memory-pressure-off')
+    options.add_argument('--max-gum-fps=60')
+    options.add_argument('--disable-background-media-tracking')
+    options.add_argument('--disable-sync')
+    
+    # Set realistic user agent matching current Chrome version
+    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    
+    # Additional headers to appear more legitimate
+    options.add_argument('--accept-language=en-US,en;q=0.9')
+    options.add_argument('--accept-encoding=gzip, deflate, br')
+    
+    # Server-specific settings for better stability
+    options.add_argument('--no-first-run')
+    options.add_argument('--no-service-autorun')
+    options.add_argument('--password-store=basic')
+    options.add_argument('--use-mock-keychain')
+    options.add_argument('--disable-component-update')
+    options.add_argument('--disable-domain-reliability')
+    
+    # Experimental settings that can help with detection
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    options.add_experimental_option("detach", True)
+    
+    # Set additional preferences
+    prefs = {
+        "profile.default_content_setting_values": {
+            "notifications": 2,
+            "media_stream": 2,
+        },
+        "profile.default_content_settings.popups": 0,
+        "profile.managed_default_content_settings.images": 2,  # Don't load images for speed
+        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1
+    }
+    options.add_experimental_option("prefs", prefs)
+    
+    try:
+        driver = uc.Chrome(options=options)
+        print("✅ Enhanced Chrome driver created successfully")
+        
+        # Execute additional scripts to mask automation
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+        driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
+        driver.execute_script("window.chrome = { runtime: {} }")
+        
+    except Exception as driver_error:
+        print(f"❌ Error creating enhanced driver: {driver_error}")
+        print("🔄 Falling back to basic configuration...")
+        
+        # Fallback to basic configuration
+        options = uc.ChromeOptions()
+        options.add_argument('--headless=new')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        driver = uc.Chrome(options=options)
+        print("✅ Basic Chrome driver created successfully")
+    
     analyzer = OfferAnalyzer()
     
     try:
@@ -1494,8 +1597,33 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
             print(f"   📦 Availability: {price_availability_info['availability']}")
             print(f"   📋 In Stock: {store_link['in_stock']}")
             
-            # Get bank offers
+            # Get bank offers with enhanced debugging
+            print(f"   🔍 Searching for bank offers on page...")
             offers = get_bank_offers(driver, amazon_url)
+            
+            # Enhanced debugging for server environments
+            if not offers:
+                print(f"   🔍 DEBUG: No offers found - checking page content...")
+                try:
+                    current_title = driver.title
+                    current_url_actual = driver.current_url
+                    page_source_length = len(driver.page_source)
+                    print(f"   🔍 DEBUG: Page title: {current_title[:100]}...")
+                    print(f"   🔍 DEBUG: Current URL: {current_url_actual[:100]}...")
+                    print(f"   🔍 DEBUG: Page source length: {page_source_length} characters")
+                    
+                    # Check if we're blocked or redirected
+                    if "captcha" in current_title.lower() or "captcha" in current_url_actual.lower():
+                        print(f"   ⚠️  CAPTCHA detected - Amazon is blocking requests")
+                    elif "robot" in driver.page_source.lower() or "automation" in driver.page_source.lower():
+                        print(f"   ⚠️  Anti-bot detection triggered")
+                    elif page_source_length < 1000:
+                        print(f"   ⚠️  Page content too small - possible loading issue")
+                    else:
+                        print(f"   ℹ️  Page loaded but no offers section found")
+                        
+                except Exception as debug_error:
+                    print(f"   ⚠️  Debug info extraction failed: {debug_error}")
             
             if offers:
                 # Get product price for ranking
@@ -1529,8 +1657,10 @@ def process_comprehensive_amazon_store_links(input_file, output_file, start_idx=
                     json.dump(data, f, indent=2, ensure_ascii=False)
                 print(f"   💾 Progress saved to {backup_file} (every 100 URLs)")
             
-            # Small delay between requests
-            time.sleep(2)
+            # Enhanced delay for server environments - random intervals to avoid detection
+            delay = random.uniform(3, 6)  # Random delay between 3-6 seconds
+            print(f"   ⏱️  Waiting {delay:.1f}s before next request...")
+            time.sleep(delay)
     
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted! Saving progress...")
