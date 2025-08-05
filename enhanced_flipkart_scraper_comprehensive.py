@@ -6,6 +6,13 @@ Enhanced Comprehensive Flipkart Scraper for comprehensive_amazon_offers.json
 - Skips URLs with existing offers to preserve data
 - Completely isolates Amazon and Croma offers from any changes
 - Focuses ONLY on Flipkart links
+
+NEW FEATURES ADDED:
+- Extracts Flipkart product prices using <div class="Nx9bqj CxhGGd yKS4la"> selector
+- Updates the 'price' key with extracted price if found
+- Adds 'in_stock' key to track product availability
+- Detects sold out status using <div class="Z8JjpR"> selector
+- Maintains existing offer scraping functionality
 """
 
 import os
@@ -32,12 +39,130 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# ===============================================
+# NEW FUNCTIONALITY: VISITED URL TRACKING
+# ===============================================
+
+def manage_visited_urls_file(file_path="visited_urls.txt"):
+    """
+    Check if visited_urls.txt exists, create it if not, and return the file path.
+    """
+    if not os.path.exists(file_path):
+        print(f"📝 Creating new visited URLs file: {file_path}")
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Visited URLs tracking file created on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("# This file tracks all Flipkart URLs that have been processed\n")
+            f.write("# Format: One URL per line\n\n")
+    else:
+        print(f"📋 Using existing visited URLs file: {file_path}")
+    return file_path
+
+def load_visited_urls(file_path="visited_urls.txt"):
+    """
+    Load previously visited URLs from the tracking file
+    """
+    visited_urls = set()
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        visited_urls.add(line)
+            print(f"📚 Loaded {len(visited_urls)} previously visited URLs")
+        else:
+            print(f"📝 No existing visited URLs file found")
+    except Exception as e:
+        print(f"⚠️  Error loading visited URLs: {e}")
+    return visited_urls
+
+def append_visited_url(url, file_path="visited_urls.txt"):
+    """
+    Append a newly processed URL to the tracking file
+    """
+    try:
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(f"{url}\n")
+    except Exception as e:
+        print(f"⚠️  Error appending URL to visited file: {e}")
+
+# ===============================================
+# NEW FUNCTIONALITY: FLIPKART PRICE AND STOCK STATUS EXTRACTION
+# ===============================================
+
+def extract_flipkart_price_and_stock(driver, url, offers_found=False):
+    """
+    Extract price and stock status from Flipkart product page
+    
+    REFINED LOGIC for in_stock flag:
+    1. If "Sold Out" tag exists → in_stock = False
+    2. If bank offers found AND no "Sold Out" tag → in_stock = True  
+    3. Otherwise → in_stock = None (undetermined)
+    
+    Args:
+        driver: Selenium WebDriver instance
+        url: Flipkart product URL
+        offers_found: bool - Whether bank offers were found on the page
+    
+    Returns:
+    dict: {
+        'price': str (extracted price or None),
+        'in_stock': bool/None (True/False/None based on refined logic)
+    }
+    """
+    try:
+        # Get page source for parsing
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        result = {
+            'price': None,
+            'in_stock': None  # Will be determined by refined logic
+        }
+        
+        # 1. Check for Flipkart price element: <div class="Nx9bqj CxhGGd yKS4la">₹52,999</div>
+        price_element = soup.find('div', class_=lambda x: x and 'Nx9bqj' in x and 'CxhGGd' in x and 'yKS4la' in x)
+        if price_element:
+            price_text = price_element.get_text(strip=True)
+            if '₹' in price_text:
+                result['price'] = price_text
+                print(f"   💰 Found Flipkart price: {price_text}")
+        
+        # 2. Check for sold out status: <div class="Z8JjpR">Sold Out</div>
+        sold_out_found = False
+        sold_out_element = soup.find('div', class_='Z8JjpR')
+        if sold_out_element and 'sold out' in sold_out_element.get_text(strip=True).lower():
+            sold_out_found = True
+            print(f"   📢 Sold Out tag found: {sold_out_element.get_text(strip=True)}")
+        
+        # 3. Apply refined logic for in_stock determination
+        if sold_out_found:
+            # Rule 1: If "Sold Out" tag exists → in_stock = False
+            result['in_stock'] = False
+            print(f"   📦 Stock status: OUT OF STOCK (Sold Out tag found)")
+        elif offers_found and not sold_out_found:
+            # Rule 2: If bank offers found AND no "Sold Out" tag → in_stock = True
+            result['in_stock'] = True
+            print(f"   📦 Stock status: IN STOCK (Offers found + No Sold Out tag)")
+        else:
+            # Rule 3: Otherwise → in_stock = None (undetermined)
+            result['in_stock'] = None
+            print(f"   📦 Stock status: UNDETERMINED (No offers found or unclear status)")
+        
+        return result
+        
+    except Exception as e:
+        print(f"   ⚠️  Error extracting price/stock: {e}")
+        return {
+            'price': None,
+            'in_stock': None
+        }
+
 class ComprehensiveFlipkartExtractor:
     """Extract ALL Flipkart store links from comprehensive JSON structure"""
     
     def __init__(self, input_file: str, flipkart_urls_file: str = None):
         self.input_file = input_file
-        self.flipkart_urls_file = flipkart_urls_file or "flipkart_urls_with_offers_20250801_132347.txt"
+        self.flipkart_urls_file = flipkart_urls_file or "visited_urls.txt"
         self.visited_flipkart_urls = set()
         self.load_visited_urls()
     
@@ -73,10 +198,11 @@ class ComprehensiveFlipkartExtractor:
                     if 'flipkart' in name:
                         url = store_link.get('url', '')
                         
-                        # CRITICAL: Skip if URL already has offers (preserve existing data)
+                        # Process ALL URLs (including those previously visited)
                         if url in self.visited_flipkart_urls:
-                            print(f"   ⏭️  Flipkart URL already has offers, skipping: {url}")
-                            continue
+                            print(f"   🔄 Flipkart URL previously visited, will re-process: {url}")
+                        else:
+                            print(f"   🆕 New Flipkart URL found: {url}")
                         
                         flipkart_links.append({
                             'path': f"{parent_path}.store_links[{store_idx}]",
@@ -498,13 +624,29 @@ def get_flipkart_offers(driver, url, max_retries=2):
 
 def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers.json", 
                                        output_file="comprehensive_amazon_offers.json",
-                                       flipkart_urls_file="flipkart_urls_with_offers_20250801_132347.txt",
-                                       start_idx=0, max_entries=None):
+                                       flipkart_urls_file="visited_urls.txt"):
     """
     Process ALL Flipkart store links in the comprehensive JSON file
     - Completely isolates Amazon and Croma offers (no changes)
-    - Only processes Flipkart links that don't have existing offers
+    - Processes ALL Flipkart links (including those with existing offers - re-scrapes everything)
     - Traverses ALL nested locations comprehensively
+    - Runs in fully automated mode (headless, no user interaction)
+    
+    NEW FUNCTIONALITY:
+    - Extracts Flipkart product prices from <div class="Nx9bqj CxhGGd yKS4la"> elements
+    - Updates 'price' key with extracted price if found
+    - Adds 'in_stock' key with refined logic:
+      * False if "Sold Out" tag exists
+      * True if bank offers found AND no "Sold Out" tag  
+      * None (undetermined) otherwise
+    - Tracks visited URLs in visited_urls.txt file
+    - Maintains existing offer scraping and ranking functionality
+    
+    AUTOMATION FEATURES:
+    - Headless server mode by default
+    - Processes all URLs from beginning to end
+    - No user prompts or interaction required
+    - Automatic URL tracking and filtering
     """
     
     # Create backup before processing
@@ -519,6 +661,10 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
     
     print(f"✅ Loaded {len(data)} entries")
     
+    # Setup visited URLs tracking with new functionality
+    visited_urls_file = manage_visited_urls_file("visited_urls.txt")
+    visited_urls = load_visited_urls(visited_urls_file)
+    
     # Initialize comprehensive extractor
     extractor = ComprehensiveFlipkartExtractor(input_file, flipkart_urls_file)
     
@@ -526,34 +672,36 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
     print(f"🔍 Searching for Flipkart links in ALL nested locations...")
     flipkart_links = extractor.find_all_flipkart_store_links(data)
     
-    print(f"📊 Found {len(flipkart_links)} Flipkart store links (excluding those with existing offers)")
+    # Check visited URLs but don't filter - process ALL links
+    original_count = len(flipkart_links)
+    already_visited_count = len([link for link in flipkart_links if link['url'] in visited_urls])
+    if already_visited_count > 0:
+        print(f"🔄 Found {already_visited_count} previously visited URLs (will re-process all)")
     
-    # Apply start index and max entries limit
-    if start_idx > 0:
-        flipkart_links = flipkart_links[start_idx:]
-        print(f"▶️  Starting from index {start_idx}, processing {len(flipkart_links)} links")
+    print(f"🚀 Processing ALL {len(flipkart_links)} Flipkart links (including those with existing offers/data)")
     
-    if max_entries:
-        flipkart_links = flipkart_links[:max_entries]
-        print(f"🔢 Limited to processing {len(flipkart_links)} links")
+    print(f"📊 Total Flipkart store links found: {len(flipkart_links)} (will process ALL)")
+    
+    # Auto-configuration: Process all links from beginning (no user interaction)
+    start_idx = 0
+    max_entries = None
+    print(f"🚀 Auto-configuration: Processing ALL {len(flipkart_links)} links from beginning to end")
     
     if not flipkart_links:
-        print("✅ No new Flipkart links to process (all existing links already have offers)")
+        print("✅ No Flipkart links found in the JSON data")
         return
     
-    # Setup Chrome driver and analyzer
-    headless_mode = os.getenv('HEADLESS', 'true').lower() == 'true'
+    # Setup Chrome driver in headless mode by default (server mode)
+    print("🤖 Running in headless server mode (no user interaction required)")
     
     options = uc.ChromeOptions()
-    if headless_mode:
-        print("🤖 Running in headless mode")
-        options.add_argument('--headless=new')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-    else:
-        print("🖥️  Running with visible browser")
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--disable-web-security')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    options.add_argument('--window-size=1920,1080')
     
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
@@ -570,14 +718,30 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
             print(f"   Path: {link_data['path']}")
             print(f"   URL: {link_data['url']}")
             
-            # CRITICAL: Verify this is indeed a Flipkart link and doesn't have offers
+            # Process ALL Flipkart links (re-scrape even if offers exist)
             store_link_ref = link_data['store_link_ref']
-            if 'ranked_offers' in store_link_ref and store_link_ref['ranked_offers']:
-                print(f"   ⏭️  Link already has offers, skipping to preserve existing data")
-                continue
+            existing_offers = 'ranked_offers' in store_link_ref and store_link_ref['ranked_offers']
+            if existing_offers:
+                print(f"   🔄 Link has existing offers, re-scraping anyway")
+            else:
+                print(f"   🆕 Processing new link")
             
-            # Get Flipkart offers
+            # Get Flipkart offers first to determine if offers exist
             offers = get_flipkart_offers(driver, link_data['url'])
+            offers_found = bool(offers and len(offers) > 0)
+            
+            # Extract price and stock status information WITH offers context
+            price_stock_info = extract_flipkart_price_and_stock(driver, link_data['url'], offers_found=offers_found)
+            
+            # Update price if found, otherwise keep existing price
+            if price_stock_info['price']:
+                store_link_ref['price'] = price_stock_info['price']
+                print(f"   💰 Updated price: {price_stock_info['price']}")
+            
+            # Add in_stock key just below price key
+            store_link_ref['in_stock'] = price_stock_info['in_stock']
+            status_text = 'In Stock' if price_stock_info['in_stock'] is True else ('Sold Out' if price_stock_info['in_stock'] is False else 'Undetermined')
+            print(f"   📦 Stock status: {status_text}")
             
             if offers:
                 # Get product price for ranking
@@ -603,6 +767,10 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
                 print(f"   ❌ No offers found")
                 store_link_ref['ranked_offers'] = []
                 processed_count += 1
+            
+            # Always add URL to visited list after processing (even if re-processed)
+            append_visited_url(link_data['url'], visited_urls_file)
+            print(f"   📝 Added URL to visited_urls.txt")
             
             # Save progress every 10 entries
             if (idx + 1) % 10 == 0:
@@ -630,6 +798,14 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
         print(f"\n📊 COMPREHENSIVE FLIPKART PROCESSING SUMMARY:")
         print(f"   Flipkart links processed: {processed_count}")
         print(f"   New offers added: {new_offers_count}")
+        print(f"   💰 Price extraction: Active (from Flipkart pages)")
+        print(f"   📦 Stock tracking: Active with refined logic")
+        print(f"      • False = Sold Out tag found")
+        print(f"      • True = Offers found + No Sold Out tag")  
+        print(f"      • None = Undetermined status")
+        print(f"   📝 URL tracking: Active (visited_urls.txt updated)")
+        print(f"   🔄 Processing: ALL links processed (including re-scraping existing)")
+        print(f"   🤖 Automation: Fully automated (headless mode)")
         print(f"   🔒 Amazon offers: COMPLETELY ISOLATED (no changes)")
         print(f"   🔒 Croma offers: COMPLETELY ISOLATED (no changes)")
         print(f"   ✅ Backup created: {backup_file}")
@@ -637,61 +813,28 @@ def process_comprehensive_flipkart_links(input_file="comprehensive_amazon_offers
 if __name__ == "__main__":
     import sys
     
-    print("🚀 Enhanced Comprehensive Flipkart Scraper")
+    print("🚀 Enhanced Comprehensive Flipkart Scraper with Price & Stock Tracking")
     print("📍 Target: comprehensive_amazon_offers.json")
     print("🔒 Amazon & Croma offers: COMPLETELY ISOLATED")
-    print("🎯 Focus: ONLY Flipkart links without existing offers")
+    print("🎯 Focus: ALL Flipkart links (re-scrapes everything)")
     print("🔍 Traversal: ALL nested locations (variants, all_matching_products, unmapped)")
+    print("💰 NEW: Price extraction from Flipkart pages")
+    print("📦 NEW: Refined stock status tracking (in_stock: true/false/null)")
+    print("📝 NEW: URL tracking in visited_urls.txt")
+    print("🤖 NEW: Fully automated (headless, no user input)")
+    print("🏆 Existing: Offer scraping and ranking")
     print("-" * 80)
     
-    # Check for command line arguments
-    if len(sys.argv) > 1 and '--headless' in sys.argv:
-        os.environ['HEADLESS'] = 'true'
-        print("🤖 Headless mode enabled via command line")
-    elif len(sys.argv) > 1 and '--gui' in sys.argv:
-        os.environ['HEADLESS'] = 'false'
-        print("🖥️  GUI mode enabled via command line")
+    # Auto-configuration: No user interaction required
+    print("🚀 Starting automated processing with default settings:")
+    print("   • Mode: Headless server mode")
+    print("   • Start index: 0 (beginning)")
+    print("   • Max entries: All available")
+    print("   • URL tracking: visited_urls.txt")
+    print()
     
-    # Ask user for browser mode if not specified
-    if 'HEADLESS' not in os.environ:
-        while True:
-            browser_mode = input("Run in headless mode? (y/n) [y for servers]: ").lower().strip()
-            if browser_mode in ['y', 'yes', '']:
-                os.environ['HEADLESS'] = 'true'
-                break
-            elif browser_mode in ['n', 'no']:
-                os.environ['HEADLESS'] = 'false'
-                break
-            else:
-                print("Please enter 'y' for yes or 'n' for no")
-    
-    # Ask user for parameters
-    while True:
-        try:
-            start_idx = input("Enter start index (or 0 for beginning): ")
-            start_idx = int(start_idx) if start_idx else 0
-            break
-        except ValueError:
-            print("Please enter a valid number")
-    
-    while True:
-        try:
-            max_entries = input("Enter max entries to process (or 'all' for all): ")
-            if max_entries.lower() == 'all':
-                max_entries = None
-                break
-            else:
-                max_entries = int(max_entries)
-                if max_entries > 0:
-                    break
-                else:
-                    print("Please enter a positive number")
-        except ValueError:
-            print("Please enter a valid number or 'all'")
-    
+    # Start processing immediately with default parameters
     process_comprehensive_flipkart_links(
-        input_file="comprehensive_amazon_offers.json",
-        output_file="comprehensive_amazon_offers.json",
-        start_idx=start_idx,
-        max_entries=max_entries
+        input_file="all_data.json",
+        output_file="all_data_flipkart.json"
     ) 
